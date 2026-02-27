@@ -201,6 +201,31 @@ def call_deepgram_transcription(audio_data, params)
   JSON.parse(response.body)
 end
 
+def call_deepgram_transcription_url(audio_url, params)
+  uri = URI('https://api.deepgram.com/v1/listen')
+
+  query_parts = params.reject { |_, v| v.nil? || v.empty? }.map { |k, v| "#{k}=#{v}" }
+  uri.query = query_parts.join('&') unless query_parts.empty?
+
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  http.read_timeout = 120
+  http.open_timeout = 30
+
+  req = Net::HTTP::Post.new(uri)
+  req['Authorization'] = "Token #{API_KEY}"
+  req['Content-Type'] = 'application/json'
+  req.body = JSON.generate({ url: audio_url })
+
+  response = http.request(req)
+
+  unless response.is_a?(Net::HTTPSuccess)
+    raise "Deepgram API returned status #{response.code}: #{response.body}"
+  end
+
+  JSON.parse(response.body)
+end
+
 # ============================================================================
 # SECTION 7: RESPONSE FORMATTING - Shape Deepgram responses for the frontend
 # ============================================================================
@@ -273,15 +298,15 @@ post '/api/transcription' do
   content_type :json
   require_session!
 
-  # Read uploaded file
-  unless params[:file] && params[:file][:tempfile]
+  audio_url = params[:url] || request.params['url']
+  has_file = params[:file] && params[:file][:tempfile]
+
+  unless has_file || (audio_url && !audio_url.empty?)
     status 400
     return JSON.generate(
       format_error_response('Either file or url must be provided', 400, 'MISSING_INPUT')
     )
   end
-
-  audio_data = params[:file][:tempfile].read
 
   # Build query parameters
   model = params[:model] || request.params['model'] || DEFAULT_MODEL
@@ -302,7 +327,24 @@ post '/api/transcription' do
 
   # Call Deepgram REST API
   begin
-    dg_response = call_deepgram_transcription(audio_data, dg_params)
+    if audio_url && !audio_url.empty?
+      # Validate URL format
+      begin
+        parsed = URI.parse(audio_url)
+        unless parsed.is_a?(URI::HTTP) || parsed.is_a?(URI::HTTPS)
+          raise URI::InvalidURIError, 'not http(s)'
+        end
+      rescue URI::InvalidURIError
+        status 400
+        return JSON.generate(
+          format_error_response('Invalid URL format', 400, 'INVALID_URL')
+        )
+      end
+      dg_response = call_deepgram_transcription_url(audio_url, dg_params)
+    else
+      audio_data = params[:file][:tempfile].read
+      dg_response = call_deepgram_transcription(audio_data, dg_params)
+    end
     response_body = format_transcription_response(dg_response, model)
     JSON.generate(response_body)
   rescue StandardError => e
